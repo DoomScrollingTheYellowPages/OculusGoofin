@@ -3,6 +3,7 @@ import {
   Scene,
   FreeCamera,
   Vector3,
+  Quaternion,
   HemisphericLight,
   MeshBuilder,
   StandardMaterial,
@@ -84,15 +85,103 @@ async function createScene(
   kekwMat.useAlphaFromDiffuseTexture = true;
   kekwPlane.material = kekwMat;
 
-  // WebXR setup — gives us controller models, teleportation, and pointer interaction
+  // --- Exit VR button below KEKW ---
+  const exitBtnPlane = MeshBuilder.CreatePlane(
+    "exitBtn",
+    { width: 1.2, height: 0.4 },
+    scene
+  );
+  exitBtnPlane.position = new Vector3(0, 0.05, 2);
+
+  const exitBtnTex = new DynamicTexture(
+    "exitBtnTex",
+    { width: 512, height: 128 },
+    scene
+  );
+  const exitBtnMat = new StandardMaterial("exitBtnMat", scene);
+  exitBtnMat.diffuseTexture = exitBtnTex;
+  exitBtnMat.emissiveColor = new Color3(1, 1, 1);
+  exitBtnMat.backFaceCulling = false;
+  exitBtnPlane.material = exitBtnMat;
+
+  const ctx = exitBtnTex.getContext() as CanvasRenderingContext2D;
+  ctx.fillStyle = "#cc3333";
+  ctx.beginPath();
+  ctx.roundRect(10, 10, 492, 108, 20);
+  ctx.fill();
+  exitBtnTex.drawText(
+    "Exit VR",
+    null,
+    90,
+    "bold 60px Arial",
+    "white",
+    null,
+    true
+  );
+
+  // WebXR setup — disable default teleportation and snap-turn
   const xr = await WebXRDefaultExperience.CreateAsync(scene, {
     floorMeshes: [ground],
+    disableTeleportation: true,
   });
 
-  // Log controller connection for debugging
-  xr.input.onControllerAddedObservable.add((controller) => {
-    console.log("Controller connected:", controller.inputSource.handedness);
-  });
+  // Exit VR when the button is clicked (use scene pointer, works with XR controllers)
+  scene.onPointerDown = (_evt, pickResult) => {
+    if (pickResult.hit && pickResult.pickedMesh === exitBtnPlane) {
+      xr.baseExperience.exitXRAsync();
+    }
+  };
+
+  // Replace snap-turn with smooth locomotion
+  if (xr.baseExperience) {
+    // Remove the default teleportation and snap-turn features
+    const featuresManager = xr.baseExperience.featuresManager;
+
+    // Smooth thumbstick movement (forward/back) and rotation (left/right)
+    const movementSpeed = 0.05;
+    const rotationSpeedBase = 0.03;
+    const rotationSpeedMax = 0.06; // 2x base at full deflection
+    let rotationHoldTime = 0;
+    const rotationRampDuration = 1.0; // seconds to reach max speed
+
+    xr.input.onControllerAddedObservable.add((controller) => {
+      console.log("Controller connected:", controller.inputSource.handedness);
+
+      controller.onMotionControllerInitObservable.add((motionController) => {
+        const thumbstick = motionController.getComponentOfType("thumbstick");
+        if (!thumbstick) return;
+
+        let lastTime = performance.now();
+
+        thumbstick.onAxisValueChangedObservable.add((axes) => {
+          const xrCamera = xr.baseExperience.camera;
+          const now = performance.now();
+          const dt = (now - lastTime) / 1000;
+          lastTime = now;
+
+          // Forward/back movement along the camera's look direction (Y axis = forward/back)
+          if (Math.abs(axes.y) > 0.1) {
+            const forward = xrCamera.getDirection(Vector3.Forward());
+            forward.y = 0; // Keep movement horizontal
+            forward.normalize();
+            xrCamera.position.addInPlace(forward.scale(-axes.y * movementSpeed));
+          }
+
+          // Smooth horizontal rotation with acceleration (X axis = left/right)
+          if (Math.abs(axes.x) > 0.1) {
+            rotationHoldTime = Math.min(rotationHoldTime + dt, rotationRampDuration);
+            const t = rotationHoldTime / rotationRampDuration;
+            const rotationSpeed = rotationSpeedBase + (rotationSpeedMax - rotationSpeedBase) * t;
+            xrCamera.rotationQuaternion.multiplyInPlace(
+              Quaternion.FromEulerAngles(0, axes.x * rotationSpeed, 0)
+            );
+          } else {
+            rotationHoldTime = 0;
+          }
+        });
+      });
+    });
+  }
 
   return scene;
 }
